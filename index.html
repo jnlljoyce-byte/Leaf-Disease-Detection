@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Leaf Disease Detection System</title>
+<!-- Pinned versions known to work together with Teachable Machine exports -->
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@1.3.1/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@0.8/dist/teachablemachine-image.min.js"></script>
+<style>
+body{font-family:Arial,sans-serif;background:#f4f7f4;text-align:center;margin:0;padding:20px;color:#222}
+h1{color:#176b36;margin-bottom:4px}
+h3{color:#176b36}
+video{width:100%;max-width:450px;border-radius:12px;background:#222}
+button{background:#176b36;color:#fff;border:none;padding:12px 20px;margin:6px;border-radius:6px;cursor:pointer;font-size:14px}
+button:hover{background:#0d4c25}
+button:disabled{background:#9ab;cursor:not-allowed}
+button.secondary{background:#555}
+.card{background:#fff;max-width:450px;margin:16px auto;padding:15px;border-radius:10px;text-align:left;box-shadow:0 1px 4px #0002}
+#preview{border-radius:10px;margin:10px;max-width:100%}
+.bar{height:8px;background:#e3e8e3;border-radius:4px;margin:2px 0 10px}
+.bar>div{height:8px;background:#176b36;border-radius:4px}
+.uncertain{color:#b45309;font-weight:bold}
+.top{font-size:18px}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th,td{border-bottom:1px solid #ddd;padding:4px;text-align:left}
+.ok{color:#176b36;font-weight:bold}.bad{color:#b91c1c;font-weight:bold}
+select,input[type=range]{margin:4px}
+small{color:#555}
+</style>
+</head>
+<body>
+<h1>Leaf Disease Detection System</h1>
+<p>Real-Time Image Classification Using Teachable Machine</p>
+
+<h3>Camera Preview</h3>
+<video id="camera" autoplay playsinline muted></video>
+<br>
+<button id="startBtn" onclick="startCamera()" disabled>Start Camera</button>
+<button id="stopBtn" onclick="stopCamera()">Stop Camera</button>
+
+<h3>Upload Leaf Image</h3>
+<input type="file" id="imageUpload" accept="image/*" capture="environment" onchange="classifyImage(event)">
+<br>
+<img id="preview" style="display:none;" alt="Uploaded leaf">
+
+<h3>Classification Results</h3>
+<div class="card">
+  <label>Confidence threshold: <b id="thrLabel">70</b>%
+    <input type="range" id="threshold" min="30" max="99" value="70"
+           oninput="thrLabel.textContent=this.value"></label>
+</div>
+<div id="results" class="card">Loading model...</div>
+<div id="info" class="card" style="display:none"></div>
+
+<div class="card" id="saveBox" style="display:none">
+  <b>Save this result to history</b><br>
+  <small>Optional (for Activity 9 testing): actual class of the leaf</small><br>
+  <select id="actualClass"><option value="">-- not specified --</option></select>
+  <button onclick="saveResult()">Save Result</button>
+</div>
+
+<h3>Classification History &amp; Testing</h3>
+<div class="card">
+  <div id="accuracy"><small>No tested samples yet.</small></div>
+  <div style="overflow-x:auto"><table id="historyTable"></table></div>
+  <button onclick="downloadCSV()">Download CSV</button>
+  <button onclick="downloadReport()">Download Report</button>
+  <button class="secondary" onclick="clearHistory()">Clear History</button>
+</div>
+
+<script>
+const MODEL_URL = "./my-model/";
+const HISTORY_KEY = "leafHistory";
+let model, stream = null, detecting = false, starting = false;
+let lastPrediction = null, lastSource = "";
+
+/* ---------- Disease information module (edit keys to match YOUR class names) ---------- */
+const DISEASE_INFO = [
+  { key: "healthy", title: "Healthy Leaf",
+    desc: "No visible disease symptoms were detected.",
+    symptoms: "Uniform green color, no spots, lesions, or deformation.",
+    management: "Continue regular watering, balanced fertilization, and routine monitoring." },
+  { key: "spot", title: "Leaf Spot (Turmeric)",
+    desc: "A fungal disease (commonly Colletotrichum) that damages turmeric leaves.",
+    symptoms: "Small brown spots that enlarge, often with a yellow halo; severe cases dry out the leaf.",
+    management: "Remove infected leaves, avoid overhead irrigation, ensure good drainage and spacing, and use a recommended fungicide if severe." },
+  { key: "blotch", title: "Leaf Blotch (Turmeric)",
+    desc: "A fungal disease (commonly Taphrina maculans) producing blotches on the leaf surface.",
+    symptoms: "Brown, irregular blotches that turn yellow to dark and may merge, leaving leaves looking scorched.",
+    management: "Remove and destroy affected leaves, improve air circulation, avoid dense planting, and apply a recommended fungicide." },
+  { key: "aphid", title: "Aphid Infestation",
+    desc: "Small sap-sucking insects that feed on leaf tissue and can spread plant viruses.",
+    symptoms: "Curled, distorted or yellowing leaves, sticky honeydew, and visible clusters of tiny insects.",
+    management: "Spray with water or neem-based solution, encourage natural predators such as ladybugs, and use a suitable insecticide only if infestation is heavy." }
+];
+function findInfo(name) {
+  const n = name.toLowerCase();
+  return DISEASE_INFO.find(d => n.includes(d.key)) || null;
+}
+
+/* ---------- Model loading ---------- */
+async function loadModel() {
+  const results = document.getElementById("results");
+  try {
+    model = await tmImage.load(MODEL_URL + "model.json", MODEL_URL + "metadata.json");
+    console.log("Model successfully loaded!");
+    results.textContent = "Model loaded successfully. Ready for classification.";
+    document.getElementById("startBtn").disabled = false;
+    const sel = document.getElementById("actualClass");
+    model.getClassLabels().forEach(l => sel.add(new Option(l, l)));
+  } catch (error) {
+    console.error(error);
+    results.textContent = "Error loading model. Check your model files and use Live Server / HTTPS.";
+  }
+}
+
+/* ---------- Camera ---------- */
+async function startCamera() {
+  if (!model || stream || starting) return;      // guard repeated starts
+  starting = true;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: "environment" } }, audio: false });
+    const video = document.getElementById("camera");
+    video.srcObject = stream;
+    await video.play();
+    console.log("Camera started successfully!");
+    detecting = true;
+    detectLeaf();
+  } catch (error) {
+    alert("Unable to access camera: " + error.message);
+  } finally { starting = false; }
+}
+
+function stopCamera() {
+  detecting = false;
+  if (stream) {
+    stream.getTracks().forEach(t => t.stop());
+    stream = null;
+    document.getElementById("camera").srcObject = null;
+    console.log("Camera stopped.");
+  }
+}
+
+async function detectLeaf() {
+  const video = document.getElementById("camera");
+  while (detecting && stream) {
+    if (video.readyState >= 2) {
+      try {
+        const predictions = await model.predict(video);
+        displayResults(predictions, "Camera");
+      } catch (e) { console.error(e); }
+    }
+    await new Promise(r => setTimeout(r, 300));
+  }
+}
+
+/* ---------- Upload ---------- */
+async function classifyImage(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  const image = document.getElementById("preview");
+  const url = URL.createObjectURL(file);
+  try {
+    image.src = url;
+    image.style.display = "block";
+    await image.decode();
+    const predictions = await model.predict(image);
+    displayResults(predictions, "Upload");
+  } catch (error) {
+    alert("Unable to classify image: " + error.message);
+  } finally { URL.revokeObjectURL(url); }
+}
+
+/* ---------- Display ---------- */
+function displayResults(predictions, source) {
+  const results = document.getElementById("results");
+  const sorted = [...predictions].sort((a, b) => b.probability - a.probability);
+  const best = sorted[0];
+  const threshold = Number(document.getElementById("threshold").value);
+  const conf = best.probability * 100;
+  lastPrediction = { className: best.className, confidence: conf };
+  lastSource = source;
+
+  results.innerHTML = "";
+  const head = document.createElement("div");
+  head.className = "top";
+  if (conf < threshold) {
+    head.innerHTML = '<span class="uncertain">Uncertain Classification</span>';
+  } else {
+    head.innerHTML = "Prediction: <strong></strong>";
+    head.querySelector("strong").textContent = best.className;
+  }
+  results.appendChild(head);
+
+  sorted.forEach(item => {
+    const pct = (item.probability * 100).toFixed(2);
+    const p = document.createElement("div");
+    const strong = document.createElement("strong");
+    strong.textContent = item.className;
+    p.append(strong, ": " + pct + "%");
+    const bar = document.createElement("div");
+    bar.className = "bar";
+    bar.innerHTML = '<div style="width:' + pct + '%"></div>';
+    results.append(p, bar);
+  });
+
+  showInfo(best.className, conf >= threshold);
+  document.getElementById("saveBox").style.display = "block";
+}
+
+function showInfo(name, confident) {
+  const box = document.getElementById("info");
+  const info = findInfo(name);
+  if (!confident || !info) { box.style.display = "none"; return; }
+  box.style.display = "block";
+  box.innerHTML = "";
+  [["Disease Information: " + info.title, null], ["Description", info.desc],
+   ["Symptoms", info.symptoms], ["Management", info.management]].forEach(([k, v], i) => {
+    const el = document.createElement(i === 0 ? "h4" : "p");
+    if (i === 0) el.textContent = k;
+    else { const b = document.createElement("b"); b.textContent = k + ": "; el.append(b, v); }
+    box.appendChild(el);
+  });
+}
+
+/* ---------- History & testing ---------- */
+function getHistory() {
+  try { return JSON.parse(localStorage.getItem(HISTORY_KEY)) || []; } catch { return []; }
+}
+function setHistory(h) {
+  try { localStorage.setItem(HISTORY_KEY, JSON.stringify(h)); } catch (e) { console.error(e); }
+}
+function saveResult() {
+  if (!lastPrediction) return;
+  const now = new Date();
+  const actual = document.getElementById("actualClass").value;
+  const h = getHistory();
+  h.push({
+    date: now.toLocaleDateString(), time: now.toLocaleTimeString(),
+    predicted: lastPrediction.className,
+    confidence: lastPrediction.confidence.toFixed(2),
+    actual, source: lastSource,
+    result: actual ? (actual === lastPrediction.className ? "Correct" : "Incorrect") : ""
+  });
+  setHistory(h);
+  renderHistory();
+}
+function renderHistory() {
+  const h = getHistory();
+  const t = document.getElementById("historyTable");
+  t.innerHTML = "<tr><th>#</th><th>Date</th><th>Time</th><th>Actual</th><th>Predicted</th><th>Conf.</th><th>Result</th></tr>";
+  h.forEach((r, i) => {
+    const tr = t.insertRow();
+    [i + 1, r.date, r.time, r.actual || "-", r.predicted, r.confidence + "%", r.result || "-"]
+      .forEach((v, c) => {
+        const td = tr.insertCell(); td.textContent = v;
+        if (c === 6 && v === "Correct") td.className = "ok";
+        if (c === 6 && v === "Incorrect") td.className = "bad";
+      });
+  });
+  const tested = h.filter(r => r.result);
+  const correct = tested.filter(r => r.result === "Correct").length;
+  document.getElementById("accuracy").innerHTML = tested.length
+    ? "<b>Accuracy:</b> " + correct + " / " + tested.length + " = " + (correct / tested.length * 100).toFixed(1) + "%"
+    : "<small>No tested samples yet. Pick an actual class when saving to compute accuracy.</small>";
+}
+function clearHistory() {
+  if (confirm("Delete all saved history?")) { setHistory([]); renderHistory(); }
+}
+function download(name, text, type) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], { type }));
+  a.download = name; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+function downloadCSV() {
+  const h = getHistory();
+  const rows = [["No", "Date", "Time", "Source", "Actual Class", "Predicted Class", "Confidence (%)", "Result"]]
+    .concat(h.map((r, i) => [i + 1, r.date, r.time, r.source, r.actual, r.predicted, r.confidence, r.result]));
+  download("classification-history.csv",
+    rows.map(r => r.map(c => '"' + String(c).replace(/"/g, '""') + '"').join(",")).join("\n"), "text/csv");
+}
+function downloadReport() {
+  const h = getHistory();
+  const tested = h.filter(r => r.result), correct = tested.filter(r => r.result === "Correct").length;
+  let t = "LEAF DISEASE CLASSIFICATION REPORT\nGenerated: " + new Date().toLocaleString() +
+    "\nTotal classifications: " + h.length + "\n";
+  t += tested.length ? "Accuracy: " + correct + "/" + tested.length + " = " + (correct / tested.length * 100).toFixed(1) + "%\n" : "";
+  t += "\n";
+  h.forEach((r, i) => {
+    const info = findInfo(r.predicted);
+    t += (i + 1) + ". " + r.date + " " + r.time + " [" + r.source + "]\n   Predicted: " + r.predicted +
+      " (" + r.confidence + "%)" + (r.actual ? "  Actual: " + r.actual + " -> " + r.result : "") + "\n";
+    if (info) t += "   Management: " + info.management + "\n";
+  });
+  t += "\nNote: Confidence is the model's output score, not proof of disease.\n";
+  download("classification-report.txt", t, "text/plain");
+}
+
+renderHistory();
+loadModel();
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("./sw.js").catch(() => {});
+</script>
+</body>
+</html>
