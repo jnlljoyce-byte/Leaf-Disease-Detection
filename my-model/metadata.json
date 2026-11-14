@@ -1,0 +1,1 @@
+{"tfjsVersion":"1.7.4","tmVersion":"2.4.19","packageVersion":"0.8.4-alpha2","packageName":"@teachablemachine/image","timeStamp":"2026-11-14T13:19:13.833Z","userMetadata":{},"modelName":"tm-my-image-model","labels":["Leaf_Spot","Healthy_Leaf","Blotch","Aphids_Disease"],"imageSize":224}
